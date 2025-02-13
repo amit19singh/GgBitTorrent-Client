@@ -30,6 +30,33 @@ struct BencodedValue {
     // Constructor for easy initialization
     template <typename T>
     BencodedValue(T&& val) : value(std::forward<T>(val)) {}
+
+    // Type-checking methods
+    bool isInt() const { return std::holds_alternative<int64_t>(value); }
+    bool isString() const { return std::holds_alternative<std::string>(value); }
+    bool isList() const { return std::holds_alternative<BencodedList>(value); }
+    bool isDict() const { return std::holds_alternative<BencodedDict>(value); }
+
+    // Value access methods
+    int64_t asInt() const {
+        if (!isInt()) throw std::runtime_error("Not an integer");
+        return std::get<int64_t>(value);
+    }
+
+    const std::string& asString() const {
+        if (!isString()) throw std::runtime_error("Not a string");
+        return std::get<std::string>(value);
+    }
+
+    const BencodedList& asList() const {
+        if (!isList()) throw std::runtime_error("Not a list");
+        return std::get<BencodedList>(value);
+    }
+
+    const BencodedDict& asDict() const {
+        if (!isDict()) throw std::runtime_error("Not a dictionary");
+        return std::get<BencodedDict>(value);
+    }
 };
 
 // BencodeParser class declaration
