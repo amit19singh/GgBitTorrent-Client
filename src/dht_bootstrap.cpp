@@ -27,9 +27,35 @@
 
 namespace DHT {
 
-    DHTBootstrap::DHTBootstrap(const NodeID& my_node_id)
-        : my_node_id_(my_node_id) {
-            init_winsock();
+    DHTBootstrap::DHTBootstrap(const NodeID& my_node_id): my_node_id_(my_node_id) {
+        init_winsock();
+
+        // Create UDP socket
+        sock_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock_ < 0) {
+    #ifdef _WIN32
+            std::cerr << "Error creating socket! Winsock error: " << WSAGetLastError() << std::endl;
+    #else
+            std::cerr << "Error creating socket! errno: " << strerror(errno) << std::endl;
+    #endif
+            exit(1);
+        }
+
+        // Bind the socket to a port
+        sockaddr_in local_addr{};
+        local_addr.sin_family = AF_INET;
+        local_addr.sin_port = htons(DHT_PORT); // Use port 6881 (or any other port)
+        local_addr.sin_addr.s_addr = INADDR_ANY; // Listen on all interfaces
+
+        if (bind(sock_, reinterpret_cast<sockaddr*>(&local_addr), sizeof(local_addr)) < 0) {
+    #ifdef _WIN32
+            std::cerr << "Error binding socket! Winsock error: " << WSAGetLastError() << std::endl;
+    #else
+            std::cerr << "Error binding socket! errno: " << strerror(errno) << std::endl;
+    #endif
+            exit(1);
+        }
+        std::cout << "DHT Node started on Port: " << DHT_PORT << std::endl;
         routing_table_.emplace_back();
     }
 
@@ -42,7 +68,7 @@ namespace DHT {
     }
 
     void DHTBootstrap::bootstrap() {
-        // init_winsock();  // Initialize Winsock on Windows
+        init_winsock();  // Initialize Winsock on Windows
 
         for (const auto& bootstrap_node : bootstrap_nodes_) {
             std::cout << "Contacting bootstrap node: " << bootstrap_node.ip << ":" << bootstrap_node.port << std::endl;
@@ -88,12 +114,12 @@ namespace DHT {
         // Create UDP socket
         int sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (sock < 0) {
-            #ifdef _WIN32
-                    std::cerr << "Error creating socket! Winsock error: " << WSAGetLastError() << std::endl;
-            #else
-                    std::cerr << "Error creating socket! errno: " << strerror(errno) << std::endl;
-            #endif
-                    return nodes;
+    #ifdef _WIN32
+            std::cerr << "Error creating socket! Winsock error: " << WSAGetLastError() << std::endl;
+    #else
+            std::cerr << "Error creating socket! errno: " << strerror(errno) << std::endl;
+    #endif
+            return nodes;
         }
     
         // Set socket timeout
@@ -136,13 +162,13 @@ namespace DHT {
         // Send the FIND_NODE request
         if (sendto(sock, request.c_str(), request.size(), 0,
                    (struct sockaddr*)&remote_addr, sizeof(remote_addr)) < 0) {
-            #ifdef _WIN32
-                    std::cerr << "Sendto failed! Winsock error: " << WSAGetLastError() << std::endl;
-            #else
-                    std::cerr << "Sendto failed! errno: " << strerror(errno) << std::endl;
-            #endif
-                    CLOSESOCKET(sock);
-                    return nodes;
+    #ifdef _WIN32
+            std::cerr << "Sendto failed! Winsock error: " << WSAGetLastError() << std::endl;
+    #else
+            std::cerr << "Sendto failed! errno: " << strerror(errno) << std::endl;
+    #endif
+            CLOSESOCKET(sock);
+            return nodes;
         }
     
         // Receive response
@@ -153,11 +179,11 @@ namespace DHT {
         int bytes_received = recvfrom(sock, buffer, sizeof(buffer), 0,
                                       (struct sockaddr*)&sender_addr, &sender_len);
         if (bytes_received < 0) {
-            #ifdef _WIN32
-                    std::cerr << "recvfrom failed! Winsock error: " << WSAGetLastError() << std::endl;
-            #else
-                    std::cerr << "recvfrom failed! errno: " << strerror(errno) << std::endl;
-            #endif
+    #ifdef _WIN32
+            std::cerr << "recvfrom failed! Winsock error: " << WSAGetLastError() << std::endl;
+    #else
+            std::cerr << "recvfrom failed! errno: " << strerror(errno) << std::endl;
+    #endif
         }
     
         // Parse the response
@@ -274,15 +300,15 @@ namespace DHT {
                (struct sockaddr*)&node_addr, sizeof(node_addr));
     
         // Set socket timeout (2 seconds)
-        #ifdef _WIN32
-            DWORD timeout = 2000; // 2000 ms 
-            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-        #else
-            struct timeval timeout{};
-            timeout.tv_sec = 2;
-            timeout.tv_usec = 0;
-            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-        #endif
+    #ifdef _WIN32
+        DWORD timeout = 2000; // 2000 ms 
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+    #else
+        struct timeval timeout{};
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    #endif
     
         // Receive the PONG response
         char buffer[1024];
@@ -296,6 +322,36 @@ namespace DHT {
     
         return (bytes_received > 0); // If data received, the node is alive
     }
+
+    void DHTBootstrap::handle_ping(const BencodedValue& request, const sockaddr_in& sender_addr) {
+        try {
+            // Extract transaction ID
+            std::string transaction_id = request.asDict().at("t").asString();
+    
+            // Extract requester's node ID
+            std::string requester_id = request.asDict().at("a").asDict().at("id").asString();
+    
+            // Create the pong response
+            BencodedDict response;
+            response["t"] = BencodedValue(transaction_id); // Same transaction ID
+            response["y"] = BencodedValue("r");           // Response type
+            response["r"] = BencodedValue(BencodedDict{
+                {"id", BencodedValue(std::string(reinterpret_cast<const char*>(my_node_id_.data()), 20))}
+            });
+    
+            // Encode the response
+            std::string response_str = BencodeEncoder::encode(response);
+    
+            // Send the response back to the requester
+            sendto(sock_, response_str.c_str(), response_str.size(), 0,
+                   reinterpret_cast<const sockaddr*>(&sender_addr), sizeof(sender_addr));
+            // Log the response
+            std::cout << "Sent PONG response to: "
+                    << inet_ntoa(sender_addr.sin_addr) << ":" << ntohs(sender_addr.sin_port) << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Error handling ping request: " << e.what() << std::endl;
+        }
+    }
     
 
     std::string node_id_to_hex(const NodeID& id) {
@@ -308,6 +364,279 @@ namespace DHT {
 
     bool ip_to_binary(const std::string& ip, uint32_t& binary_ip) {
         return inet_pton(AF_INET, ip.c_str(), &binary_ip) == 1;
+    }
+
+    void DHTBootstrap::handle_find_node(const BencodedValue& request, const sockaddr_in& sender_addr) {
+        try {
+            // Extract transaction ID
+            std::string transaction_id = request.asDict().at("t").asString();
+    
+            // Extract target ID
+            std::string target_id_str = request.asDict().at("a").asDict().at("target").asString();
+            NodeID target_id;
+            std::memcpy(target_id.data(), target_id_str.data(), NODE_ID_SIZE);
+    
+            // Find the K closest nodes to the target ID
+            std::vector<Node> closest_nodes = find_closest_nodes(target_id, K);
+    
+            // Create the response
+            BencodedDict response;
+            response["t"] = BencodedValue(transaction_id); // Same transaction ID
+            response["y"] = BencodedValue("r");           // Response type
+            response["r"] = BencodedValue(BencodedDict{
+                {"id", BencodedValue(std::string(reinterpret_cast<const char*>(my_node_id_.data()), 20))},
+                {"nodes", BencodedValue(encode_nodes(closest_nodes))}
+            });
+    
+            // Encode the response
+            std::string response_str = BencodeEncoder::encode(response);
+    
+            // Send the response back to the requester
+            sendto(sock_, response_str.c_str(), response_str.size(), 0,
+                   reinterpret_cast<const sockaddr*>(&sender_addr), sizeof(sender_addr));
+    
+            // Log the response
+            std::cout << "************Sent FIND_NODE response to: "
+                      << inet_ntoa(sender_addr.sin_addr) << ":" << ntohs(sender_addr.sin_port) << std::endl;
+            std::cout << "Response sent: " << response_str << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Error handling find_node request: " << e.what() << std::endl;
+        }
+    }
+
+    std::vector<Node> DHTBootstrap::find_closest_nodes(const NodeID& target_id, size_t k) {
+        std::vector<Node> closest_nodes;
+        for (const auto& bucket : routing_table_) {
+            for (const auto& node : bucket) {
+                closest_nodes.push_back(node);
+            }
+        }
+    
+        // Sort nodes by XOR distance to the target ID
+        std::sort(closest_nodes.begin(), closest_nodes.end(), [&](const Node& a, const Node& b) {
+            return xor_distance(a.id, target_id) < xor_distance(b.id, target_id);
+        });
+    
+        // Return the K closest nodes
+        if (closest_nodes.size() > k) {
+            closest_nodes.resize(k);
+        }
+        return closest_nodes;
+    }
+
+    std::string DHTBootstrap::encode_nodes(const std::vector<Node>& nodes) {
+        std::string result;
+        for (const auto& node : nodes) {
+            // Node ID (20 bytes)
+            result.append(reinterpret_cast<const char*>(node.id.data()), 20);
+    
+            // IP address (4 bytes)
+            uint32_t ip_binary;
+            inet_pton(AF_INET, node.ip.c_str(), &ip_binary);
+            result.append(reinterpret_cast<const char*>(&ip_binary), 4);
+    
+            // Port (2 bytes, network byte order)
+            uint16_t port_network = htons(node.port);
+            result.append(reinterpret_cast<const char*>(&port_network), 2);
+        }
+        return result;
+    }
+
+    std::string DHTBootstrap::encode_peers(const std::vector<Node>& peers) {
+        std::string result;
+        for (const auto& peer : peers) {
+            // IP address (4 bytes)
+            uint32_t ip_binary;
+            inet_pton(AF_INET, peer.ip.c_str(), &ip_binary);
+            result.append(reinterpret_cast<const char*>(&ip_binary), 4);
+    
+            // Port (2 bytes, network byte order)
+            uint16_t port_network = htons(peer.port);
+            result.append(reinterpret_cast<const char*>(&port_network), 2);
+        }
+        return result;
+    }
+
+    void DHTBootstrap::handle_get_peers(const BencodedValue& request, const sockaddr_in& sender_addr) {
+        try {
+            // Extract transaction ID
+            std::string transaction_id = request.asDict().at("t").asString();
+    
+            // Extract infohash
+            std::string infohash = request.asDict().at("a").asDict().at("info_hash").asString();
+    
+            // Check if peers are available for the infohash
+            auto it = peer_store_.find(infohash);
+            if (it != peer_store_.end()) {
+                // Return peers
+                BencodedDict response;
+                response["t"] = BencodedValue(transaction_id); // Same transaction ID
+                response["y"] = BencodedValue("r");           // Response type
+                response["r"] = BencodedValue(BencodedDict{
+                    {"id", BencodedValue(std::string(reinterpret_cast<const char*>(my_node_id_.data()), 20))},
+                    {"values", BencodedValue(encode_peers(it->second))}
+                });
+    
+                // Encode the response
+                std::string response_str = BencodeEncoder::encode(response);
+    
+                // Send the response back to the requester
+                sendto(sock_, response_str.c_str(), response_str.size(), 0,
+                       reinterpret_cast<const sockaddr*>(&sender_addr), sizeof(sender_addr));
+    
+                // Log the response
+                std::cout << "Sent GET_PEERS response (peers) to: "
+                          << inet_ntoa(sender_addr.sin_addr) << ":" << ntohs(sender_addr.sin_port) << std::endl;
+            } else {
+                // Return the K closest nodes
+                NodeID target_id;
+                std::memcpy(target_id.data(), infohash.data(), NODE_ID_SIZE);
+                std::vector<Node> closest_nodes = find_closest_nodes(target_id, K);
+    
+                BencodedDict response;
+                response["t"] = BencodedValue(transaction_id); // Same transaction ID
+                response["y"] = BencodedValue("r");           // Response type
+                response["r"] = BencodedValue(BencodedDict{
+                    {"id", BencodedValue(std::string(reinterpret_cast<const char*>(my_node_id_.data()), 20))},
+                    {"nodes", BencodedValue(encode_nodes(closest_nodes))}
+                });
+    
+                // Encode the response
+                std::string response_str = BencodeEncoder::encode(response);
+    
+                // Send the response back to the requester
+                sendto(sock_, response_str.c_str(), response_str.size(), 0,
+                       reinterpret_cast<const sockaddr*>(&sender_addr), sizeof(sender_addr));
+    
+                // Log the response
+                std::cout << "Sent GET_PEERS response (nodes) to: "
+                          << inet_ntoa(sender_addr.sin_addr) << ":" << ntohs(sender_addr.sin_port) << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error handling get_peers request: " << e.what() << std::endl;
+        }
+    }
+
+    NodeID DHTBootstrap::string_to_node_id(const std::string& str) {
+        NodeID node_id;
+        if (str.size() != NODE_ID_SIZE) {
+            throw std::runtime_error("Invalid string length for NodeID");
+        }
+        std::memcpy(node_id.data(), str.data(), NODE_ID_SIZE);
+        return node_id;
+    }
+
+    void DHTBootstrap::handle_announce_peer(const BencodedValue& request, const sockaddr_in& sender_addr) {
+        try {
+            // Extract infohash
+            std::string infohash = request.asDict().at("a").asDict().at("info_hash").asString();
+    
+            // Extract peer information
+            Node peer;
+            peer.ip = inet_ntoa(sender_addr.sin_addr);
+            peer.port = ntohs(sender_addr.sin_port);
+    
+            // Store the peer information
+            peer_store_[infohash].push_back(peer);
+    
+            // Log the announcement
+            std::cout << "Stored peer " << peer.ip << ":" << peer.port
+                      << " for infohash " << node_id_to_hex(string_to_node_id(infohash)) << std::endl;
+    
+            // Send a response
+            BencodedDict response;
+            response["t"] = BencodedValue(request.asDict().at("t").asString()); // Same transaction ID
+            response["y"] = BencodedValue("r");                                // Response type
+            response["r"] = BencodedValue(BencodedDict{
+                {"id", BencodedValue(std::string(reinterpret_cast<const char*>(my_node_id_.data()), 20))}
+            });
+    
+            // Encode the response
+            std::string response_str = BencodeEncoder::encode(response);
+    
+            // Send the response back to the requester
+            sendto(sock_, response_str.c_str(), response_str.size(), 0,
+                   reinterpret_cast<const sockaddr*>(&sender_addr), sizeof(sender_addr));
+    
+            // Log the response
+            std::cout << "Sent ANNOUNCE_PEER response to: "
+                      << inet_ntoa(sender_addr.sin_addr) << ":" << ntohs(sender_addr.sin_port) << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Error handling announce_peer request: " << e.what() << std::endl;
+        }
+    }
+    
+    void DHTBootstrap::run() {
+        char buffer[1024];
+        sockaddr_in sender_addr{};
+        socklen_t sender_len = sizeof(sender_addr);
+    
+        while (true) {
+            // Receive a message
+            int bytes_received = recvfrom(sock_, buffer, sizeof(buffer), 0,
+                                          reinterpret_cast<sockaddr*>(&sender_addr), &sender_len);
+            if (bytes_received < 0) {
+    #ifdef _WIN32
+                int wsa_error = WSAGetLastError();
+                std::cerr << "recvfrom failed! WSA Error Code: " << wsa_error << std::endl;
+    #else
+                std::cerr << "recvfrom failed! errno: " << strerror(errno) << std::endl;
+    #endif
+                continue;
+            }
+    
+            // Log received bytes and sender details
+            std::cout << "[DHT] Received " << bytes_received << " bytes from "
+                      << inet_ntoa(sender_addr.sin_addr) << ":" << ntohs(sender_addr.sin_port) << std::endl;
+    
+            // Log raw message in hex format
+            std::cout << "[DHT] Raw Data: ";
+            for (int i = 0; i < bytes_received; i++) {
+                printf("%02x ", (unsigned char)buffer[i]);
+            }
+            std::cout << std::endl;
+    
+            // Parse the message
+            try {
+                BencodeParser parser;
+                std::string message_str(buffer, bytes_received);
+                BencodedValue message = parser.parse(message_str);
+    
+                // Log Parsed Message (JSON-like format)
+                std::cout << "[DHT] Parsed Message: " << message_str << std::endl;
+    
+                // Extract the message type
+                std::string message_type = message.asDict().at("y").asString();
+    
+                if (message_type == "q") {  // Query message
+                    std::string query_type = message.asDict().at("q").asString();
+                    std::cout << "[DHT] Query Type: " << query_type << std::endl;
+    
+                    if (query_type == "ping") {
+                        std::cout << "[DHT] Handling PING request from " 
+                                  << inet_ntoa(sender_addr.sin_addr) << ":" 
+                                  << ntohs(sender_addr.sin_port) << std::endl;
+                        handle_ping(message, sender_addr);
+                    } else if (query_type == "find_node") {
+                        std::cout << "[DHT] Handling FIND_NODE request" << std::endl;
+                        handle_find_node(message, sender_addr);
+                    } else if (query_type == "get_peers") {
+                        std::cout << "[DHT] Handling GET_PEERS request" << std::endl;
+                        handle_get_peers(message, sender_addr);
+                    } else if (query_type == "announce_peer") {
+                        std::cout << "[DHT] Handling ANNOUNCE_PEERS request" << std::endl;
+                        handle_announce_peer(message, sender_addr);
+                    }
+                } else if (message_type == "r") {  // Response message
+                    std::cout << "[DHT] Received RESPONSE message" << std::endl;
+                } else if (message_type == "e") {  // Error message
+                    std::cout << "[DHT] Received ERROR message" << std::endl;
+                }
+    
+            } catch (const std::exception& e) {
+                std::cerr << "[DHT] Error parsing message: " << e.what() << std::endl;
+            }
+        }
     }
 
 }
