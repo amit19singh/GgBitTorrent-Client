@@ -15,8 +15,8 @@
     #include <ws2tcpip.h>  // For inet_pton, inet_ntop
     #pragma comment(lib, "ws2_32.lib")  // Link against Winsock library
     #define CLOSESOCKET closesocket
-    void init_winsock();
-    void cleanup_winsock();
+    static void init_winsock();
+    static void cleanup_winsock();
 #else
     #include <arpa/inet.h>
     #include <sys/socket.h>
@@ -49,6 +49,7 @@ namespace DHT {
     class DHTBootstrap {
     public:
         DHTBootstrap(const NodeID& my_node_id);
+        // ~DHTBootstrap();
         void add_bootstrap_node(const std::string& ip, uint16_t port);
         void bootstrap();
         const std::vector<Bucket>& get_routing_table() const;
