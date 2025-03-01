@@ -4,13 +4,14 @@
 
 void testValidTorrentFile() {
     // Assuming a valid .torrent test file exists
-    std::string testFilePath = "C:/Users/amit1/Dropbox/test_torrent.torrent";
+    std::string testFilePath = "C:/Users/amit1/Dropbox/temp.torrent";
     
     try {
         TorrentFileParser parser(testFilePath);
         TorrentFile torrent = parser.parse();
         
         // Print parsed data
+        std::cout << "File Path: " << testFilePath << "\n";
         std::cout << "Parsed Torrent File:\n";
         std::cout << "Announce URL: " << torrent.announce << "\n";
         std::cout << "Comment: " << torrent.comment << "\n";

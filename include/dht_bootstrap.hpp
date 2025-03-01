@@ -58,6 +58,11 @@ namespace DHT {
         std::vector<Node> send_find_node_request(const Node& remote_node, const NodeID& target_id);
         void run(); // Main loop for handling incoming messages
 
+        const NodeID& getMyNodeId() const {
+            return my_node_id_;
+        }
+
+
     private:
         int sock_;
         // static NodeID generate_random_node_id();

@@ -387,7 +387,18 @@ namespace DHT {
         inet_pton(AF_INET, node.ip.c_str(), &node_addr.sin_addr);
 
         // Ping message
-        std::string ping_msg = "PING";
+        // std::string ping_msg = "PING";
+        // Create a valid DHT PING query
+        BencodedDict query;
+        query["id"] = BencodedValue(std::string(reinterpret_cast<const char*>(my_node_id_.data()), 20));
+
+        BencodedDict message;
+        message["t"] = BencodedValue("pp"); // Transaction ID
+        message["y"] = BencodedValue("q");  // Query
+        message["q"] = BencodedValue("ping");
+        message["a"] = BencodedValue(query);
+
+        std::string ping_msg = BencodeEncoder::encode(message);
 
         // Send the PING message
         sendto(sock, ping_msg.c_str(), ping_msg.size(), 0,
@@ -442,6 +453,7 @@ namespace DHT {
             std::cout << "Sent PONG response to: "
                       << inet_ntoa(sender_addr.sin_addr) << ":" 
                       << ntohs(sender_addr.sin_port) << std::endl;
+            std::cout << "PONG RESPONSE: \n" << response_str << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "Error handling ping request: " << e.what() << std::endl;
         }
@@ -637,6 +649,7 @@ namespace DHT {
                 std::cout << "Sent GET_PEERS response (nodes) to: "
                           << inet_ntoa(sender_addr.sin_addr) << ":" 
                           << ntohs(sender_addr.sin_port) << std::endl;
+                std::cout << "RESPONSE STRING - GET PEERS:\n" << response_str << std::endl;
             }
         } catch (const std::exception& e) {
             std::cerr << "Error handling get_peers request: " << e.what() << std::endl;
@@ -712,7 +725,7 @@ namespace DHT {
         char buffer[1024];
         sockaddr_in sender_addr{};
         socklen_t sender_len = sizeof(sender_addr);
-
+        
         while (true) {
             // Receive a message
             int bytes_received = recvfrom(sock_, buffer, sizeof(buffer), 0,

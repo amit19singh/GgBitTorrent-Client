@@ -1,45 +1,70 @@
-#include "../include/dht_bootstrap.hpp"
-#include <iostream>
+// #include "../include/dht_bootstrap.hpp"
+// #include <iostream>
 
-int main() {
-    // Generate a random Node ID
-    DHT::NodeID my_node_id = DHT::DHTBootstrap::generate_random_node_id();
+// int main() {
+//     // Generate a random Node ID
+//     DHT::NodeID my_node_id = DHT::DHTBootstrap::generate_random_node_id();
 
-    // Create a DHTBootstrap instance
-    DHT::DHTBootstrap dht_bootstrap(my_node_id);
+//     // Create a DHTBootstrap instance
+//     DHT::DHTBootstrap dht_bootstrap(my_node_id);
+//     dht_bootstrap.add_bootstrap_node("67.215.246.10", 6881);
 
-    // Add bootstrap nodes (example: public BitTorrent DHT nodes)
-    // dht_bootstrap.add_bootstrap_node("67.215.246.10", 6881);
-    // dht_bootstrap.add_bootstrap_node("router.utorrent.com", 6881);
-    // dht_bootstrap.add_bootstrap_node("dht.transmissionbt.com", 6881);
+//     // Generate a random target Node ID
+//     DHT::NodeID target_id = DHT::DHTBootstrap::generate_random_node_id();
 
-    // // Start the bootstrap process
-    // dht_bootstrap.bootstrap();
+//     // Send a FIND_NODE request
+//     auto nodes = dht_bootstrap.send_find_node_request(dht_bootstrap.get_bootstrap_nodes()[0], target_id);
 
-    // // Keep it running
-    // dht_bootstrap.run();
-
-    // Add a well-known bootstrap node
-    // dht_bootstrap.add_bootstrap_node("router.bittorrent.com", 6881);
-    dht_bootstrap.add_bootstrap_node("67.215.246.10", 6881);
-
-    // Generate a random target Node ID
-    DHT::NodeID target_id = DHT::DHTBootstrap::generate_random_node_id();
-
-    // Send a FIND_NODE request
-    auto nodes = dht_bootstrap.send_find_node_request(dht_bootstrap.get_bootstrap_nodes()[0], target_id);
-
-    // Print the received nodes
-    std::cout << "Received " << nodes.size() << " nodes:" << std::endl;
-    for (const auto& node : nodes) {
-        std::cout << "  Node: " << node.ip << ":" << node.port  
-                  << " (ID: " << DHT::node_id_to_hex(node.id) << ")" << std::endl;
-    }
+//     // Print the received nodes
+//     std::cout << "Received " << nodes.size() << " nodes:" << std::endl;
+//     for (const auto& node : nodes) {
+//         std::cout << "  Node: " << node.ip << ":" << node.port  
+//                   << " (ID: " << DHT::node_id_to_hex(node.id) << ")" << std::endl;
+//     }
     
-    dht_bootstrap.bootstrap();
+//     dht_bootstrap.bootstrap();
 
-    // Keep it running
-    dht_bootstrap.run();
+//     // Keep it running
+//     dht_bootstrap.run();
+//     return 0;
+// }
+
+#include "../include/peer_wire_protocol.hpp"
+#include <iostream>
+#include <array>
+#include <cstdlib> 
+
+
+int main(int argc, char* argv[]) {
+
+    if (argc != 3) {
+        std::cerr << "Usage: " << argv[0] << " <peer_ip> <peer_port>\n";
+        return 1;
+    }
+
+    std::string peerIP = argv[1];
+    int peerPort = std::atoi(argv[2]);  // Convert string to int
+
+    if (peerPort <= 0 || peerPort > 65535) {
+        std::cerr << "Error: Invalid port number.\n";
+        return 1;
+    }
+
+    PeerWireProtocol pwp;
+    
+    // Set info hash (use a real torrent hash)
+    std::array<uint8_t, 20> testInfoHash = {0x3f, 0x9a, 0xac, 0x15, 0x8c, 0x7d, 0xe8, 
+                                            0xdf, 0xca, 0xb1, 0x71, 0xea, 0x58, 0xa1, 
+                                            0x7a, 0xab, 0xdf, 0x7f, 0xbc, 0x93};
+    pwp.setInfoHash(testInfoHash);
+    
+    // Connect to the specified peer
+    try {
+        std::cout << "Connecting to " << peerIP << ":" << peerPort << "...\n";
+        pwp.connectToPeer(peerIP, peerPort);
+    } catch (const std::exception& e) {
+        std::cerr << "Connection failed: " << e.what() << std::endl;
+    }
+
     return 0;
 }
-
