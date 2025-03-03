@@ -1,6 +1,7 @@
 #ifndef PEER_WIRE_PROTOCOL_HPP
 #define PEER_WIRE_PROTOCOL_HPP
 
+#include "../include/torrent_file_parser.hpp"
 #include "dht_bootstrap.hpp"
 #include <vector>
 #include <string>
@@ -32,7 +33,7 @@ class PeerConnection;
 class PeerWireProtocol {
 public:
     // Constructor & Destructor
-    PeerWireProtocol();
+    PeerWireProtocol(const std::string& torrentFilePath);
     ~PeerWireProtocol();
 
     // Establishes a connection with a peer
@@ -48,7 +49,7 @@ public:
     void sendBitfield(int peerSocket, const std::vector<bool>& bitfield);
 
     // Handles an incoming bitfield message
-    void handleBitfield(int peerSocket, const std::vector<bool>& bitfield);
+    void handleBitfield(int peerSocket, const std::vector<uint8_t>& bitfield);
 
     // Sends a request for a specific piece
     void sendRequest(int peerSocket, int pieceIndex, int blockOffset, int blockSize);
@@ -74,19 +75,23 @@ public:
     // Runs the PWP event loop
     void run();
 
-    void setInfoHash(const std::array<uint8_t, 20>& hash) {
-        info_hash = hash;
-    }
+    // void setInfoHash(const std::array<uint8_t, 20>& hash) {
+    //     info_hash = hash;
+    // }
 
     std::array<uint8_t, 20> getInfoHash() {
-        return info_hash;
+        return infoHash;
     }
 
 private:
     std::unordered_map<int, std::shared_ptr<PeerConnection>> peers; // Stores peer connections
     std::mutex peerMutex; // Synchronization for multi-threading
-    std::array<uint8_t, 20> info_hash; // Stores the torrent's info hash
     DHT::DHTBootstrap* dht_instance;   // Pointer to DHT instance
+    TorrentFileParser torrentFileParser;
+    TorrentFile torrentFile; 
+    std::array<uint8_t, 20> infoHash;
+
 };
 
 #endif // PEER_WIRE_PROTOCOL_HPP
+

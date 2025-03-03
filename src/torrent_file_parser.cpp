@@ -1,6 +1,8 @@
 #include "../include/torrent_file_parser.hpp"
+#include "../include/bencode_encoder.hpp"
 #include <fstream>
 #include <sstream>
+#include <iostream>
 #include <stdexcept>
 
 
@@ -29,38 +31,67 @@ TorrentFile TorrentFileParser::parse() {
     // Extract the root dictionary
     auto& rootDict = std::get<BencodedDict>(parsedData.value);
 
-    // Extract metadata
-    TorrentFile torrentFile;
-    torrentFile.announce = extractString(rootDict, "announce");
-    torrentFile.comment = extractString(rootDict, "comment");
-    torrentFile.creationDate = extractInt(rootDict, "creation date");
-
     // Extract info dictionary
-    if (rootDict.find("info") == rootDict.end()) {
+    if (rootDict.find("info") == rootDict.end() ||
+            !std::holds_alternative<BencodedDict>(rootDict.at("info").value)) {
         throw std::runtime_error("Invalid .torrent file format: Missing 'info' dictionary");
     }
 
-    if (!std::holds_alternative<BencodedDict>(rootDict.at("info").value)) {
-        throw std::runtime_error("Invalid .torrent file format: 'info' is not a dictionary");
-    }
+    // Extract metadata
+    TorrentFile parsedTorrent;
+    parsedTorrent.announce = extractString(rootDict, "announce");
+    parsedTorrent.comment = extractString(rootDict, "comment");
+    parsedTorrent.creationDate = extractInt(rootDict, "creation date");
 
     auto& infoDict = std::get<BencodedDict>(rootDict.at("info").value);
-    torrentFile.name = extractString(infoDict, "name");
-    torrentFile.pieceLength = extractInt(infoDict, "piece length");
-    torrentFile.pieces = extractPieces(infoDict);
+    parsedTorrent.name = extractString(infoDict, "name");
+    parsedTorrent.pieceLength = extractInt(infoDict, "piece length");
+    parsedTorrent.pieces = extractPieces(infoDict);
 
     // Handle single-file vs multi-file torrents
+    // if (infoDict.find("length") != infoDict.end()) {
+    //     // Single-file torrent
+    //     torrentFile.files.push_back({torrentFile.name, extractInt(infoDict, "length")});
+    // } else {
+    //     // Multi-file torrent
+    //     torrentFile.files = extractFiles(infoDict);
+    // }
+    // Handle single-file vs multi-file torrents
+
+    int64_t totalFileSize = 0;
     if (infoDict.find("length") != infoDict.end()) {
         // Single-file torrent
-        torrentFile.files.push_back({torrentFile.name, extractInt(infoDict, "length")});
+        totalFileSize = extractInt(infoDict, "length");
+        parsedTorrent.files.push_back({parsedTorrent.name, totalFileSize});
     } else {
         // Multi-file torrent
-        torrentFile.files = extractFiles(infoDict);
+        parsedTorrent.files = extractFiles(infoDict);
+        for (const auto& file : parsedTorrent.files) {
+            totalFileSize += file.second;  // Sum up all file sizes
+        }
     }
 
-    return torrentFile;
+    // Compute number of pieces
+    parsedTorrent.numPieces = (totalFileSize / parsedTorrent.pieceLength) +
+                            ((totalFileSize % parsedTorrent.pieceLength) > 0 ? 1 : 0);
+
+    // --- Compute the info hash ---
+    // Encode the "info" dictionary back into its bencoded form
+    std::string encodedInfo = BencodeEncoder::encode(BencodedValue(infoDict));
+    // Compute SHA-1 hash of the encoded info string (you must implement or use a library function)
+    parsedTorrent.infoHash = computeSHA1(encodedInfo);
+    // ----------------------------------
+
+    std::cout << "Total file size: " << totalFileSize << " bytes\n";
+    std::cout << "Piece length: " << parsedTorrent.pieceLength << " bytes\n";
+    std::cout << "Number of pieces: " << parsedTorrent.numPieces << "\n";
+
+    return parsedTorrent;
 }
 
+const int TorrentFileParser::getNumPieces() {
+    return parsedTorrent.numPieces;
+}
 
 std::string TorrentFileParser::extractString(const BencodedValue& dict, const std::string& key) {
     if (!std::holds_alternative<BencodedDict>(dict.value)) {

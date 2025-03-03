@@ -1,8 +1,12 @@
 #include "../include/peer_wire_protocol.hpp"
 #include "../include/peer_connection.hpp"
+#include "../include/torrent_file_parser.hpp"
 #include <cstring>
 #include <algorithm>
 #include <random>
+#include <iostream>
+#include <iomanip>
+#include <array>
 
 // Helper function to close sockets cross-platform
 void closeSocket(int sock) {
@@ -13,7 +17,25 @@ void closeSocket(int sock) {
 #endif
 }
 
-PeerWireProtocol::PeerWireProtocol() {
+PeerWireProtocol::PeerWireProtocol(const std::string& torrentFilePath) 
+    : torrentFileParser(torrentFilePath) {
+        std::cout << "Initializing DHT Bootstrap in PeerWireProtocol..." << std::endl;
+    
+        // Generate a random node ID
+        DHT::NodeID my_node_id = DHT::DHTBootstrap::generate_random_node_id();
+    
+        // Initialize DHT Bootstrap
+        dht_instance = new DHT::DHTBootstrap(my_node_id);
+        dht_instance->add_bootstrap_node("67.215.246.10", 6881); // Add a known bootstrap node
+    
+        std::cout << "DHT Bootstrap initialized successfully." << std::endl;
+    try {
+        torrentFile = torrentFileParser.parse();  // Parse the torrent file
+        infoHash = torrentFile.infoHash;
+    } catch (const std::exception& e) {
+        std::cerr << "Error parsing torrent file: " << e.what() << std::endl;
+        throw;  // Rethrow exception
+    }
 #ifdef _WIN32
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -67,52 +89,212 @@ void PeerWireProtocol::connectToPeer(const std::string& peerIP, int peerPort) {
     }).detach();
 }
 
-////////////////////HERE//////////////////////////////////////////////////////////////////////////////
+
 void PeerWireProtocol::sendHandshake(int peerSocket) {
     std::vector<uint8_t> handshake;
     handshake.reserve(68);
     
     std::cout << "Inside sendHandshake" << '\n';
+
     // Protocol length
     handshake.push_back(HANDSHAKE_PROTOCOL_LEN);
-    
+
     // Protocol string
-    handshake.insert(handshake.end(), 
-                    HANDSHAKE_PROTOCOL_STR, 
-                    HANDSHAKE_PROTOCOL_STR + HANDSHAKE_PROTOCOL_LEN);
-    
-    // Reserved bytes
+    handshake.insert(handshake.end(), HANDSHAKE_PROTOCOL_STR, HANDSHAKE_PROTOCOL_STR + HANDSHAKE_PROTOCOL_LEN);
+
+    // Reserved bytes (8 bytes, all zero)
     handshake.insert(handshake.end(), 8, 0);
 
+    // Info Hash (SHA-1 hash of the torrent's metadata)
     std::array<uint8_t, 20> infoHash = getInfoHash();
-    
-    // Info Hash (20 bytes) - SHA-1 hash of the torrent's metadata
-    handshake.insert(handshake.end(), infoHash.begin(), infoHash.end());
-    
-    // Peer ID (20 bytes) - Get the unique ID from DHT
-    const DHT::NodeID& peerId = dht_instance->getMyNodeId();
-    handshake.insert(handshake.end(), peerId.begin(), peerId.end());
 
-    // Send the handshake
-    int sent = send(peerSocket, reinterpret_cast<const char *>(handshake.data()), handshake.size(), 0);
+    // // ////////////////////////////////////////
+    // std::cout << "InfoHASH: ";
+    // for (uint8_t byte : infoHash) {
+    //     std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+    // }
+    // std::cout << std::dec << std::endl;
+    // // ////////////////////////////////////////
 
-    if (sent != static_cast<int>(handshake.size())) {
-        std::cerr << "Failed to send full handshake to peer socket: " << peerSocket << std::endl;
-    } else {
-        std::cout << "Sent handshake to peer socket: " << peerSocket << std::endl;
+    // handshake.insert(handshake.end(), infoHash.begin(), infoHash.end());
+
+    // // Peer ID (our DHT Node ID)
+    // const DHT::NodeID& peerId = dht_instance->getMyNodeId();
+    // handshake.insert(handshake.end(), peerId.begin(), peerId.end());
+
+    // // Send the handshake
+    // int sent = send(peerSocket, reinterpret_cast<const char*>(handshake.data()), handshake.size(), 0);
+    // if (sent != static_cast<int>(handshake.size())) {
+    //     std::cerr << "Failed to send full handshake to peer socket: " << peerSocket << '\n';
+    //     return;
+    // }
+    // std::cout << "Sent handshake to peer socket: " << peerSocket << '\n';
+
+    // // Receive handshake response (68 bytes)
+    // uint8_t response[68];
+    // int received = recv(peerSocket, reinterpret_cast<char*>(response), sizeof(response), 0);
+    // if (received != 68) {
+    //     std::cerr << "Peer did not respond with a valid handshake. Received " << received << " bytes." << '\n';
+    //     return;
+    // }
+    // std::cout << "Received handshake from peer!" << '\n';
+
+    // // Start reading the next message (Bitfield, Choke, Unchoke, etc.)
+    // std::vector<uint8_t> buffer(4096);  // Allocate buffer for message
+    // int bytes_read = recv(peerSocket, reinterpret_cast<char*>(buffer.data()), buffer.size(), 0);
+
+    // std::cout << "Trying to read post-handshake message" << '\n';
+
+    std::cout << "InfoHASH (raw bytes): ";
+    for (uint8_t byte : infoHash) {
+        std::cout << static_cast<int>(byte) << " ";
     }
+    std::cout << '\n';
 
-    // Wait for handshake response (blocking)
-    uint8_t response[68];
-    int received = recv(peerSocket, reinterpret_cast<char *>(response), sizeof(response), 0);
-    if (received <= 0) {
-        std::cerr << "Peer did not respond to handshake." << std::endl;
+    // Convert infoHash to hex string
+    std::ostringstream infoHashHex;
+    infoHashHex << std::hex << std::setw(2) << std::setfill('0');
+    for (uint8_t byte : infoHash) {
+        infoHashHex << static_cast<int>(byte);
+    }
+    std::cout << "InfoHASH (Hex): " << infoHashHex.str() << '\n';
+
+    // Log before inserting into handshake
+    std::cout << "Inserting infoHash into handshake..." << '\n';
+    handshake.insert(handshake.end(), infoHash.begin(), infoHash.end());
+    std::cout << "Inserted infoHash into handshake." << '\n';
+
+    // Peer ID (our DHT Node ID)
+    if (!dht_instance) {
+        std::cerr << "Error: DHT instance is null!" << '\n';
         return;
     }
+    
+    const DHT::NodeID& peerId = dht_instance->getMyNodeId();
+    std::cout << "Peer ID Retrieved: ";
+    for (uint8_t byte : peerId) {
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte) << " ";
+    }
+    std::cout << std::dec << '\n';
 
-    // Successfully received handshake response
-    std::cout << "Received handshake from peer!" << std::endl;
+    std::cout << "Retrieved peer ID from DHT instance." << '\n';
+    
+    handshake.insert(handshake.end(), peerId.begin(), peerId.end());
+    std::cout << "Inserted peer ID into handshake." << '\n';
+
+    // Debug: Check handshake size before sending
+    std::cout << "Final handshake size: " << handshake.size() << " bytes\n";
+    std::cout << "Final handshake contents (hex): ";
+    for (uint8_t byte : handshake) {
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte) << " ";
+    }
+    std::cout << std::dec << '\n';
+
+    // Send the handshake
+    std::cout << "Sending handshake to peer...\n";
+    int sent = send(peerSocket, reinterpret_cast<const char*>(handshake.data()), handshake.size(), 0);
+    if (sent != static_cast<int>(handshake.size())) {
+        std::cerr << "Failed to send full handshake to peer socket: " << peerSocket << '\n';
+        std::cerr << "Send returned: " << sent << " (Expected: " << handshake.size() << ")\n";
+        std::cerr << "Send error: " << strerror(errno) << '\n';
+        return;
+    }
+    std::cout << "Sent handshake to peer socket: " << peerSocket << '\n';
+
+    // Receive handshake response (68 bytes)
+    uint8_t response[68];
+    std::cout << "Waiting for handshake response from peer...\n";
+    int received = recv(peerSocket, reinterpret_cast<char*>(response), sizeof(response), 0);
+    if (received != 68) {
+        std::cerr << "Peer did not respond with a valid handshake. Received " << received << " bytes.\n";
+        std::cerr << "Recv error: " << strerror(errno) << '\n';
+        return;
+    }
+    std::cout << "Received handshake from peer!\n";
+
+    // Start reading the next message (Bitfield, Choke, Unchoke, etc.)
+    std::vector<uint8_t> buffer(4096);  // Allocate buffer for message
+    std::cout << "Trying to read post-handshake message...\n";
+    int bytes_read = recv(peerSocket, reinterpret_cast<char*>(buffer.data()), buffer.size(), 0);
+    if (bytes_read <= 0) {
+        std::cerr << "No post-handshake message received. Bytes read: " << bytes_read << '\n';
+        std::cerr << "Recv error: " << strerror(errno) << '\n';
+        return;
+    }
+    std::cout << "Received " << bytes_read << " bytes after handshake.\n";
+
+    // Print raw message in hex
+    std::cout << "Raw message: ";
+    for (int i = 0; i < bytes_read; i++) {
+        printf("%02x ", buffer[i]);
+    }
+    std::cout << '\n';
+
+    if (bytes_read > 0) {
+        std::cout << "Received " << bytes_read << " bytes after handshake." << '\n';
+
+        // Print raw bytes in hex format for debugging
+        std::cout << "Raw message: ";
+        for (int i = 0; i < bytes_read; i++) {
+            printf("%02x ", buffer[i]);
+        }
+        std::cout << '\n';
+
+        // Ensure we have at least 4 bytes for the length prefix
+        if (bytes_read >= 4) {
+            uint32_t messageLength;
+            memcpy(&messageLength, buffer.data(), 4);
+            messageLength = ntohl(messageLength);  // Convert from network byte order
+            std::cout << "Parsed message length: " << messageLength << '\n';
+
+            // Read full message if more data is expected
+            if (messageLength + 4 > bytes_read) {
+                int remaining_bytes = (messageLength + 4) - bytes_read;
+                std::vector<uint8_t> extra_buffer(remaining_bytes);
+                int extra_read = recv(peerSocket, reinterpret_cast<char*>(extra_buffer.data()), remaining_bytes, 0);
+                if (extra_read > 0) {
+                    buffer.insert(buffer.end(), extra_buffer.begin(), extra_buffer.begin() + extra_read);
+                    bytes_read += extra_read;
+                }
+            }
+        }
+
+        // Ensure we have at least 1 byte for message type
+        if (bytes_read >= 5) {
+            uint8_t messageType = buffer[4];  // The message type is always at index 4
+            std::cout << "Message Type ID: " << (int)messageType << '\n';
+
+            switch (messageType) {
+                case 5: {  // Bitfield
+                    std::cout << "Received BITFIELD message!" << '\n';
+                    std::vector<uint8_t> bitfield(buffer.begin() + 5, buffer.end());
+                    handleBitfield(peerSocket, bitfield);
+                    break;
+                }
+                case 0:
+                    std::cout << "Received CHOKE message!" << '\n';
+                    break;
+                case 1:
+                    std::cout << "Received UNCHOKE message!" << '\n';
+                    break;
+                case 2:
+                    std::cout << "Received INTERESTED message!" << '\n';
+                    break;
+                case 3:
+                    std::cout << "Received NOT INTERESTED message!" << '\n';
+                    break;
+                default:
+                    std::cout << "Unknown message type: " << (int)messageType << '\n';
+                    break;
+            }
+        } else {
+            std::cout << "Not enough data to determine message type." << '\n';
+        }
+    } else {
+        std::cerr << "No message received after handshake." << '\n';
+    }
 }
+
 
 void PeerWireProtocol::handleHandshake(int peerSocket) {
     uint8_t buffer[68];
@@ -158,11 +340,46 @@ void PeerWireProtocol::sendBitfield(int peerSocket, const std::vector<bool>& bit
     send(peerSocket, reinterpret_cast<char *>(message.data()), message.size(), 0);
 }
 
-void PeerWireProtocol::handleBitfield(int peerSocket, const std::vector<bool>& bitfield) {
+void PeerWireProtocol::handleBitfield(int peerSocket, const std::vector<uint8_t>& bitfieldBytes) {
+    std::vector<bool> bitfield;  // Store pieces in a bitfield
+    int bitIndex = 0;
+    int numPieces = torrentFile.numPieces;  // Fetch numPieces from parser
+
+
+    // Convert each byte into 8 bits 
+    // for (uint8_t byte : bitfieldBytes) {
+    //     for (int i = 7; i >= 0; --i) {  // Extract bits from MSB to LSB
+    //         // bitfield.push_back((byte >> i) & 1);
+    //         if (bitIndex < numPieces) {  // Only store valid bits
+    //             bitfield.push_back((byte >> i) & 1);
+    //         }
+    //         bitIndex++;
+    //     }
+    // }
+    for (size_t i = 0; i < bitfieldBytes.size(); ++i) {
+        for (int j = 7; j >= 0; --j) {
+            size_t bitIndex = (i * 8) + (7 - j);
+            if (bitIndex >= numPieces) break;  // Prevent extra bits
+            bitfield[bitIndex] = (bitfieldBytes[i] >> j) & 1;
+        }
+    }
+
+    std::cout << "Bitfield length (bits): " << bitfield.size() << '\n';
+    std::cout << "Bitfield length (bytes): " << bitfieldBytes.size() << '\n';
+
+
+    // Store the processed bitfield in peer's state
     std::lock_guard<std::mutex> lock(peerMutex);
     if (peers.find(peerSocket) != peers.end()) {
         peers[peerSocket]->bitfield = bitfield;
     }
+
+    std::cout << "Processed bitfield from peer " << peerSocket << ": ";
+    for (bool hasPiece : bitfield) {
+        std::cout << hasPiece;
+    }
+    std::cout << '\n';
+
 }
 
 void PeerWireProtocol::sendRequest(int peerSocket, int pieceIndex, int blockOffset, int blockSize) {
