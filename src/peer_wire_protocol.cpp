@@ -1,12 +1,16 @@
 #include "../include/peer_wire_protocol.hpp"
 #include "../include/peer_connection.hpp"
 #include "../include/torrent_file_parser.hpp"
+#include "../include/piece_manager.hpp"
+
 #include <cstring>
 #include <algorithm>
 #include <random>
 #include <iostream>
-#include <iomanip>
 #include <array>
+#include <openssl/evp.h>
+#include <winhttp.h>
+#pragma comment(lib, "winhttp.lib")
 
 // Helper function to close sockets cross-platform
 void closeSocket(int sock) {
@@ -18,8 +22,8 @@ void closeSocket(int sock) {
 }
 
 PeerWireProtocol::PeerWireProtocol(const std::string& torrentFilePath) 
-    : torrentFileParser(torrentFilePath) {
-        std::cout << "Initializing DHT Bootstrap in PeerWireProtocol..." << std::endl;
+    : torrentFileParser(torrentFilePath), pieceStorage(nullptr) {
+        std::cout << "Initializing DHT Bootstrap in PeerWireProtocol..." << '\n';
     
         // Generate a random node ID
         DHT::NodeID my_node_id = DHT::DHTBootstrap::generate_random_node_id();
@@ -28,12 +32,20 @@ PeerWireProtocol::PeerWireProtocol(const std::string& torrentFilePath)
         dht_instance = new DHT::DHTBootstrap(my_node_id);
         dht_instance->add_bootstrap_node("67.215.246.10", 6881); // Add a known bootstrap node
     
-        std::cout << "DHT Bootstrap initialized successfully." << std::endl;
+        std::cout << "DHT Bootstrap initialized successfully." << '\n';
+        
+        // Automatically bootstrap the DHT
+        dht_instance->bootstrap();
     try {
         torrentFile = torrentFileParser.parse();  // Parse the torrent file
         infoHash = torrentFile.infoHash;
+        // Initialize PieceManager with the number of pieces and piece length
+        // pieceStorage = std::make_unique<PieceManager>(torrentFile.numPieces, torrentFile.pieceLength);
+
+        std::cout << "Torrent parsed: " << torrentFile.numPieces 
+                    << " pieces, " << torrentFile.pieceLength << " bytes each.\n";
     } catch (const std::exception& e) {
-        std::cerr << "Error parsing torrent file: " << e.what() << std::endl;
+        std::cerr << "Error parsing torrent file: " << e.what() << '\n';
         throw;  // Rethrow exception
     }
 #ifdef _WIN32
@@ -54,7 +66,9 @@ PeerWireProtocol::~PeerWireProtocol() {
     }
 }
 
-void PeerWireProtocol::connectToPeer(const std::string& peerIP, int peerPort) {
+int PeerWireProtocol::connectToPeer(const std::string& peerIP, int peerPort) {
+    std::cout << "**ATTEMPTING TO CONNECT TO PEER: " << peerIP << ":" << peerPort << "**" << std::endl;
+    
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         throw std::runtime_error("Socket creation failed");
@@ -66,6 +80,7 @@ void PeerWireProtocol::connectToPeer(const std::string& peerIP, int peerPort) {
     inet_pton(AF_INET, peerIP.c_str(), &peerAddr.sin_addr);
 
     if (connect(sock, (sockaddr*)&peerAddr, sizeof(peerAddr))) {
+        std::cerr << "**ERROR: CONNECTION FAILED TO " << peerIP << ":" << peerPort << " - Connection refused or timed out**" << std::endl;
         closeSocket(sock);
         throw std::runtime_error("Connection failed to " + peerIP);
     }
@@ -87,6 +102,8 @@ void PeerWireProtocol::connectToPeer(const std::string& peerIP, int peerPort) {
     std::thread([this, sock]() {
         handlePeerOutput(sock);
     }).detach();
+
+    return sock;
 }
 
 
@@ -107,43 +124,6 @@ void PeerWireProtocol::sendHandshake(int peerSocket) {
 
     // Info Hash (SHA-1 hash of the torrent's metadata)
     std::array<uint8_t, 20> infoHash = getInfoHash();
-
-    // // ////////////////////////////////////////
-    // std::cout << "InfoHASH: ";
-    // for (uint8_t byte : infoHash) {
-    //     std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
-    // }
-    // std::cout << std::dec << std::endl;
-    // // ////////////////////////////////////////
-
-    // handshake.insert(handshake.end(), infoHash.begin(), infoHash.end());
-
-    // // Peer ID (our DHT Node ID)
-    // const DHT::NodeID& peerId = dht_instance->getMyNodeId();
-    // handshake.insert(handshake.end(), peerId.begin(), peerId.end());
-
-    // // Send the handshake
-    // int sent = send(peerSocket, reinterpret_cast<const char*>(handshake.data()), handshake.size(), 0);
-    // if (sent != static_cast<int>(handshake.size())) {
-    //     std::cerr << "Failed to send full handshake to peer socket: " << peerSocket << '\n';
-    //     return;
-    // }
-    // std::cout << "Sent handshake to peer socket: " << peerSocket << '\n';
-
-    // // Receive handshake response (68 bytes)
-    // uint8_t response[68];
-    // int received = recv(peerSocket, reinterpret_cast<char*>(response), sizeof(response), 0);
-    // if (received != 68) {
-    //     std::cerr << "Peer did not respond with a valid handshake. Received " << received << " bytes." << '\n';
-    //     return;
-    // }
-    // std::cout << "Received handshake from peer!" << '\n';
-
-    // // Start reading the next message (Bitfield, Choke, Unchoke, etc.)
-    // std::vector<uint8_t> buffer(4096);  // Allocate buffer for message
-    // int bytes_read = recv(peerSocket, reinterpret_cast<char*>(buffer.data()), buffer.size(), 0);
-
-    // std::cout << "Trying to read post-handshake message" << '\n';
 
     std::cout << "InfoHASH (raw bytes): ";
     for (uint8_t byte : infoHash) {
@@ -204,6 +184,45 @@ void PeerWireProtocol::sendHandshake(int peerSocket) {
     // Receive handshake response (68 bytes)
     uint8_t response[68];
     std::cout << "Waiting for handshake response from peer...\n";
+    
+    // int received = 0;
+    // int remaining = 68;
+    // int attempts = 3;  // Number of retries
+
+    // while (remaining > 0 && attempts-- > 0) {
+    //     int bytes = recv(peerSocket, reinterpret_cast<char*>(response) + received, remaining, 0);
+
+    //     if (bytes > 0) {
+    //         std::cout << "**DEBUG: Received " << bytes << " bytes:** ";
+    //         for (int i = 0; i < bytes; i++) {
+    //             printf("%02x ", response[i]);
+    //         }
+    //         std::cout << '\n';
+    //     }
+
+    //     if (bytes <= 0) {
+    //         std::cerr << "**WARNING: Incomplete handshake received. Retrying... (" 
+    //                 << attempts << " attempts left)**" << std::endl;
+    //         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    //         continue;
+    //     }
+
+    //     received += bytes;
+    //     remaining -= bytes;
+    // }
+
+    // if (received != 68) {
+    //     std::cerr << "**ERROR: Handshake failed. Received only " << received 
+    //             << " bytes instead of 68. Closing connection.**" << std::endl;
+    //     closeSocket(peerSocket);
+    //     return;
+    // }
+
+    // std::cout << "**SUCCESSFUL: FULL HANDSHAKE RECEIVED FROM PEER**" << std::endl;
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
     int received = recv(peerSocket, reinterpret_cast<char*>(response), sizeof(response), 0);
     if (received != 68) {
         std::cerr << "Peer did not respond with a valid handshake. Received " << received << " bytes.\n";
@@ -211,6 +230,9 @@ void PeerWireProtocol::sendHandshake(int peerSocket) {
         return;
     }
     std::cout << "Received handshake from peer!\n";
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
 
     // Start reading the next message (Bitfield, Choke, Unchoke, etc.)
     std::vector<uint8_t> buffer(4096);  // Allocate buffer for message
@@ -406,24 +428,50 @@ void PeerWireProtocol::sendRequest(int peerSocket, int pieceIndex, int blockOffs
         }
     }
 }
-////////////////////HERE//////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////// HERE ///////////////////////////////////////////////////////
 void PeerWireProtocol::handleRequest(int peerSocket, int pieceIndex, int blockOffset, int blockSize) {
-    // Implementation would depend on your piece management system
-    // Here we just forward valid requests to the message queue
-    std::vector<uint8_t> request(12);
+    std::lock_guard<std::mutex> lock(peerMutex);
+
+    // Check if peer exists
+    if (peers.find(peerSocket) == peers.end()) {
+        std::cerr << "Error: Peer socket " << peerSocket << " not found.\n";
+        return;
+    }
+
+    // Validate request
+    if (pieceIndex < 0 || pieceIndex >= torrentFile.numPieces || blockSize <= 0 || blockSize > MAX_BLOCK_SIZE) {
+        std::cerr << "Invalid request from peer " << peerSocket << " for piece " << pieceIndex 
+                  << ", offset " << blockOffset << ", size " << blockSize << '\n';
+        return;
+    }
+
+    // Fetch the requested piece data
+    std::vector<uint8_t> pieceData;
+    if (!pieceStorage->getPieceBlock(pieceIndex, blockOffset, blockSize, pieceData)) {
+        std::cerr << "Error: Failed to retrieve requested block.\n";
+        return;
+    } else {
+        std::cout << "Retrieved " << pieceData.size() << " bytes for piece " << pieceIndex << " (offset " << blockOffset << ").\n";
+    }
+
+    // Construct the Piece message
+    std::vector<uint8_t> pieceMessage(9 + blockSize);  // 9 bytes header + block data
     uint32_t netPiece = htonl(pieceIndex);
     uint32_t netOffset = htonl(blockOffset);
-    uint32_t netSize = htonl(blockSize);
     
-    memcpy(request.data(), &netPiece, 4);
-    memcpy(request.data() + 4, &netOffset, 4);
-    memcpy(request.data() + 8, &netSize, 4);
+    memcpy(pieceMessage.data(), &netPiece, 4);
+    memcpy(pieceMessage.data() + 4, &netOffset, 4);
+    memcpy(pieceMessage.data() + 8, pieceData.data(), blockSize);
 
-    std::lock_guard<std::mutex> lock(peerMutex);
-    if (peers.find(peerSocket) != peers.end()) {
-        peers[peerSocket]->message_queue.push_back(request);
-    }
+    // Add message to peer's queue
+    peers[peerSocket]->message_queue.push_back(pieceMessage);
+    
+    std::cout << "Queued response for peer " << peerSocket << " for piece " << pieceIndex 
+              << " (offset " << blockOffset << ", size " << blockSize << ").\n";
 }
+
+
 
 void PeerWireProtocol::sendPiece(int peerSocket, int pieceIndex, int blockOffset, 
                                const std::vector<uint8_t>& blockData) {
@@ -453,13 +501,118 @@ void PeerWireProtocol::sendPiece(int peerSocket, int pieceIndex, int blockOffset
 }
 
 ////////////////////HERE//////////////////////////////////////////////////////////////////////////////
-void PeerWireProtocol::handlePiece(int peerSocket, int pieceIndex, int blockOffset,
-                                 const std::vector<uint8_t>& blockData) {
-    // Implementation would depend on your storage system
-    std::cout << "Received piece " << pieceIndex
-              << " block " << blockOffset
-              << " (" << blockData.size() << " bytes)\n";
+// void PeerWireProtocol::handlePiece(int peerSocket, int pieceIndex, int blockOffset, const std::vector<uint8_t>& blockData) {
+//     std::lock_guard<std::mutex> lock(peerMutex);
+
+//     // Validate piece index
+//     if (pieceIndex < 0 || pieceIndex >= torrentFile.numPieces) {
+//         std::cerr << "Error: Invalid piece index " << pieceIndex << " received from peer " << peerSocket << '\n';
+//         return;
+//         }
+
+//     // Store the received block
+//     bool success = pieceStorage->storePieceBlock(pieceIndex, blockOffset, blockData);
+//     if (!success) {
+//         std::cerr << "Error: Failed to store received piece block for piece " << pieceIndex << '\n';
+//         return;
+//     }
+
+//     std::cout << "Received piece " << pieceIndex << ", block " << blockOffset 
+//     << " (" << blockData.size() << " bytes) from peer " << peerSocket << '\n';
+
+//     // Check if we have received the full piece
+//     if (pieceStorage->isPieceComplete(pieceIndex)) {
+//         std::cout << "storePieceBlock: Piece " << pieceIndex << " is now complete!\n";
+//         std::vector<uint8_t> fullPiece;
+//         // pieceStorage->getFullPiece(pieceIndex, fullPiece);
+//         // Retrieve full piece data
+//         if (!pieceStorage->getFullPiece(pieceIndex, fullPiece) || fullPiece.empty()) {
+//             std::cerr << "ERROR: Failed to retrieve full piece data for verification (Piece " << pieceIndex << ").\n";
+//             return;
+//         }
+
+//         std::cout << "Verifying SHA-1 for complete piece " << pieceIndex << "...\n";
+
+//         // Compute SHA-1 hash and verify
+//         std::string computedHash = computeSHA1(fullPiece);
+//         std::string expectedHash = torrentFile.pieces[pieceIndex];
+
+//         std::cout << "Computed Hash: " << computedHash << '\n';
+//         std::cout << "Expected Hash: " << expectedHash << '\n';
+
+//         // if (computedHash != torrentFile.pieces[pieceIndex]) {
+//             if (computedHash != expectedHash) {
+//             std::cerr << "Error: SHA-1 hash mismatch for piece " << pieceIndex << '\n';
+//             return;
+//         }
+
+//         // Mark piece as downloaded
+//         pieceStorage->markPieceAsDownloaded(pieceIndex);
+//         std::cout << "Piece " << pieceIndex << " successfully verified and stored.\n";
+//     }
+// }
+
+void PeerWireProtocol::handlePiece(int peerSocket, int pieceIndex, int blockOffset, const std::vector<uint8_t>& blockData) {
+    std::lock_guard<std::mutex> lock(peerMutex);
+
+    // Validate piece index
+    if (pieceIndex < 0 || pieceIndex >= torrentFile.numPieces) {
+        std::cerr << "Error: Invalid piece index " << pieceIndex << " received from peer " << peerSocket << '\n';
+        return;
+    }
+
+    // Store the received block
+    bool success = pieceStorage->storePieceBlock(pieceIndex, blockOffset, blockData);
+    if (!success) {
+        std::cerr << "Error: Failed to store received piece block for piece " << pieceIndex << '\n';
+        return;
+    }
+
+    std::cout << "Received piece " << pieceIndex << ", block " << blockOffset 
+              << " (" << blockData.size() << " bytes) from peer " << peerSocket << '\n';
+
+    // Check if we have received the full piece
+    if (pieceStorage->isPieceComplete(pieceIndex)) {
+        std::cout << "storePieceBlock: Piece " << pieceIndex << " is now complete!\n";
+
+        std::vector<uint8_t> fullPiece;
+        if (!pieceStorage->getFullPiece(pieceIndex, fullPiece) || fullPiece.empty()) {
+            std::cerr << "Error: Failed to retrieve full piece data for verification (Piece " << pieceIndex << ").\n";
+            return;
+        }
+
+        std::cout << "Retrieved full piece " << pieceIndex << " (" << fullPiece.size() << " bytes) for verification.\n";
+
+        /////////////////////////// ONLY FOR TESTING //////////////////////////////////////////////////////////////////
+        // if (pieceIndex == 10 || pieceIndex == 20 || pieceIndex == 30) {
+        //     torrentFile.pieces[pieceIndex] = computeSHA1(fullPiece); // Override expected hash for test
+        // }
+        //////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+        // Compute SHA-1 hash and verify
+        std::string computedHash = computeSHA1(fullPiece);
+        std::string expectedHash = rawToHex(torrentFile.pieces[pieceIndex]);
+        // std::string expectedHash = torrentFile.pieces[pieceIndex];
+
+        // Debugging: Print hashes
+        std::cout << "Computed Hash: " << computedHash << '\n';
+        std::cout << "Expected Hash: " << expectedHash << '\n';
+
+        // Validate hash
+        if (computedHash != expectedHash) {
+            std::cerr << "Error: SHA-1 hash mismatch for piece " << pieceIndex << "!\n";
+            return;
+        }
+
+        // Mark piece as successfully downloaded
+        pieceStorage->markPieceAsDownloaded(pieceIndex);
+        std::cout << "Piece " << pieceIndex << " successfully verified and stored.\n";
+    }
 }
+
+
+
+
 
 void PeerWireProtocol::manageChoking() {
     while (true) {
@@ -623,3 +776,280 @@ void PeerWireProtocol::handlePeerOutput(int sock) {
     closeSocket(sock);
     peers.erase(sock);
 }
+
+
+std::string PeerWireProtocol::computeSHA1(const std::vector<uint8_t>& data) {
+    EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+    if (!mdctx) {
+        throw std::runtime_error("EVP_MD_CTX_new failed");
+    }
+
+    if (EVP_DigestInit_ex(mdctx, EVP_sha1(), nullptr) != 1) {
+        EVP_MD_CTX_free(mdctx);
+        throw std::runtime_error("EVP_DigestInit_ex failed");
+    }
+
+    if (EVP_DigestUpdate(mdctx, data.data(), data.size()) != 1) {
+        EVP_MD_CTX_free(mdctx);
+        throw std::runtime_error("EVP_DigestUpdate failed");
+    }
+
+    unsigned char hash[SHA_DIGEST_LENGTH];
+    unsigned int hashLen = 0;
+    if (EVP_DigestFinal_ex(mdctx, hash, &hashLen) != 1) {
+        EVP_MD_CTX_free(mdctx);
+        throw std::runtime_error("EVP_DigestFinal_ex failed");
+    }
+
+    EVP_MD_CTX_free(mdctx);
+
+    std::ostringstream oss;
+    for (int i = 0; i < SHA_DIGEST_LENGTH; i++) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+    }
+
+    return oss.str();
+}
+
+
+
+
+//////////////////////////// QUERY TRACKER ////////////////////////////////////////////////////////////////
+// Helper: URL-encode a binary string
+std::string urlEncode(const std::string& data) {
+    std::ostringstream oss;
+    oss << std::hex << std::uppercase;
+    for (unsigned char c : data) {
+        // Encode all characters; in production, you may skip alphanumerics.
+        oss << '%' << std::setw(2) << std::setfill('0') << static_cast<int>(c);
+    }
+    return oss.str();
+}
+
+// Overload for std::array<uint8_t, 20>
+std::string urlEncode(const std::array<uint8_t, 20>& data) {
+    std::ostringstream oss;
+    oss << std::hex << std::uppercase;
+    for (uint8_t byte : data) {
+        oss << '%' << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+    }
+    return oss.str();
+}
+
+
+// Helper: Parse the "peers" value from the tracker response.
+// Handles both compact (binary string) and non-compact (list of dictionaries) formats.
+std::vector<DHT::Node> parseTrackerPeers(const BencodedValue& peersValue) {
+    std::vector<DHT::Node> peers;
+
+    // Compact format: peers is a single binary string
+    if (std::holds_alternative<std::string>(peersValue.value)) {
+        std::string peersStr = std::get<std::string>(peersValue.value);
+        if (peersStr.size() % 6 != 0) {
+            std::cerr << "**ERROR: Invalid peers string length.**" << std::endl;
+            return peers;
+        }
+        for (size_t i = 0; i < peersStr.size(); i += 6) {
+            DHT::Node node;
+            uint32_t ipBinary = 0;
+            memcpy(&ipBinary, peersStr.data() + i, 4);
+            struct in_addr ipAddr;
+            ipAddr.s_addr = ipBinary;
+            node.ip = inet_ntoa(ipAddr);
+            uint16_t portNetwork = 0;
+            memcpy(&portNetwork, peersStr.data() + i + 4, 2);
+            node.port = ntohs(portNetwork);
+            peers.push_back(node);
+        }
+    }
+    // Non-compact format: peers is a list of dictionaries
+    else if (std::holds_alternative<BencodedList>(peersValue.value)) {
+        const BencodedList& peersList = std::get<BencodedList>(peersValue.value);
+        for (const auto& peerEntry : peersList) {
+            BencodedDict peerDict = peerEntry.asDict();
+            auto ipIt = peerDict.find("ip");
+            auto portIt = peerDict.find("port");
+            if (ipIt != peerDict.end() && portIt != peerDict.end()) {
+                DHT::Node node;
+                node.ip = ipIt->second.asString();
+                node.port = static_cast<uint16_t>(portIt->second.asInt());
+                peers.push_back(node);
+            } else {
+                std::cerr << "**WARNING: Peer dictionary missing 'ip' or 'port'.**" << std::endl;
+            }
+        }
+    }
+    else {
+        std::cerr << "**ERROR: Unknown peers format.**" << std::endl;
+    }
+    return peers;
+}
+
+// Implementation of queryTracker() in PeerWireProtocol (Windows version)
+std::vector<DHT::Node> PeerWireProtocol::queryTracker() {
+    std::vector<DHT::Node> trackerPeers;
+
+    // Get the announce URL from the torrent file
+    std::string announceUrl = torrentFile.announce;
+    if (announceUrl.empty()) {
+        std::cerr << "**ERROR: No tracker announce URL in torrent file.**" << std::endl;
+        return trackerPeers;
+    }
+
+    // Prepare query parameters.
+    // The infoHash is stored in torrentFile.infoHash (assumed to be a 20-byte binary string)
+    std::string encodedInfoHash = urlEncode(infoHash);
+    
+    // Get peer_id from the DHT instance (assumed to be DHT::NodeID, e.g., std::array<uint8_t,20>)
+    std::string peerIdStr;
+    {
+        const DHT::NodeID& peerId = dht_instance->getMyNodeId();
+        peerIdStr = std::string(reinterpret_cast<const char*>(peerId.data()), peerId.size());
+    }
+    std::string encodedPeerId = urlEncode(peerIdStr);
+
+    // Build the query parameters:
+    // Typical parameters: ?info_hash=...&peer_id=...&port=6881&uploaded=0&downloaded=0&left=0&event=started
+    std::ostringstream queryParams;
+    queryParams << "?info_hash=" << encodedInfoHash
+                << "&peer_id=" << encodedPeerId
+                << "&port=6881"
+                << "&uploaded=0"
+                << "&downloaded=0"
+                << "&left=0"
+                << "&event=started";
+
+    std::string fullUrl = announceUrl + queryParams.str();
+    std::cout << "**QUERYING TRACKER: " << fullUrl << "**" << std::endl;
+
+    // Convert fullUrl (UTF-8) to wide string (UTF-16) for WinHTTP.
+    int wideLen = MultiByteToWideChar(CP_UTF8, 0, fullUrl.c_str(), -1, NULL, 0);
+    if (wideLen == 0) {
+        std::cerr << "**ERROR: Failed to convert URL to wide string.**" << std::endl;
+        return trackerPeers;
+    }
+    std::wstring wFullUrl(wideLen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, fullUrl.c_str(), -1, &wFullUrl[0], wideLen);
+
+    // Initialize URL_COMPONENTS structure
+    URL_COMPONENTS urlComp;
+    memset(&urlComp, 0, sizeof(urlComp));
+    urlComp.dwStructSize = sizeof(urlComp);
+
+    // Prepare buffers for host name and URL path.
+    wchar_t hostName[256] = {0};
+    wchar_t urlPath[1024] = {0};
+    urlComp.lpszHostName = hostName;
+    urlComp.dwHostNameLength = _countof(hostName);
+    urlComp.lpszUrlPath = urlPath;
+    urlComp.dwUrlPathLength = _countof(urlPath);
+
+    if (!WinHttpCrackUrl(wFullUrl.c_str(), static_cast<DWORD>(wFullUrl.size() * sizeof(wchar_t)), 0, &urlComp)) {
+        std::cerr << "**ERROR: WinHttpCrackUrl failed.**" << std::endl;
+        return trackerPeers;
+    }
+
+    // Open a WinHTTP session.
+    HINTERNET hSession = WinHttpOpen(L"PeerWireProtocol/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) {
+        std::cerr << "**ERROR: WinHttpOpen failed.**" << std::endl;
+        return trackerPeers;
+    }
+
+    // Connect to the tracker host.
+    HINTERNET hConnect = WinHttpConnect(hSession, hostName, urlComp.nPort, 0);
+    if (!hConnect) {
+        std::cerr << "**ERROR: WinHttpConnect failed.**" << std::endl;
+        WinHttpCloseHandle(hSession);
+        return trackerPeers;
+    }
+
+    // Open an HTTP request.
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", urlPath, NULL,
+                                            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                            (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0);
+    if (!hRequest) {
+        std::cerr << "**ERROR: WinHttpOpenRequest failed.**" << std::endl;
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return trackerPeers;
+    }
+
+    // Send the HTTP GET request.
+    BOOL bResults = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                       WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (!bResults) {
+        std::cerr << "**ERROR: WinHttpSendRequest failed.**" << std::endl;
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return trackerPeers;
+    }
+
+    // Receive the response.
+    bResults = WinHttpReceiveResponse(hRequest, NULL);
+    if (!bResults) {
+        std::cerr << "**ERROR: WinHttpReceiveResponse failed.**" << std::endl;
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return trackerPeers;
+    }
+
+    // Read the response data into a string.
+    std::string responseStr;
+    DWORD dwSize = 0;
+    do {
+        DWORD dwDownloaded = 0;
+        if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) {
+            std::cerr << "**ERROR: WinHttpQueryDataAvailable failed.**" << std::endl;
+            break;
+        }
+
+        if (dwSize == 0)
+            break;  // No more data
+
+        std::vector<char> buffer(dwSize);
+        if (!WinHttpReadData(hRequest, buffer.data(), dwSize, &dwDownloaded)) {
+            std::cerr << "**ERROR: WinHttpReadData failed.**" << std::endl;
+            break;
+        }
+
+        responseStr.append(buffer.data(), dwDownloaded);
+    } while (dwSize > 0);
+
+    // Close WinHTTP handles.
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    std::cout << "**TRACKER RESPONSE RECEIVED (" << responseStr.size() << " bytes)**" << std::endl;
+    // For debugging, print first 256 characters (if available)
+    std::cout << responseStr.substr(0, 256) << std::endl;
+
+    // Parse the tracker response using your BencodeParser
+    try {
+        BencodeParser parser;
+        BencodedValue responseValue = parser.parse(responseStr);
+        // Expect a dictionary
+        BencodedDict responseDict = responseValue.asDict();
+
+        // Look for the "peers" key using find() instead of operator[]
+        auto it = responseDict.find("peers");
+        if (it == responseDict.end()) {
+            std::cerr << "**ERROR: Tracker response does not contain a 'peers' key.**" << std::endl;
+            return trackerPeers;
+        }
+        
+        std::cout << "STARTING TO PARSE TRACKER PEERS" << '\n';
+        trackerPeers = parseTrackerPeers(it->second);
+        
+    } catch (const std::exception& e) {
+        std::cerr << "**ERROR: Failed to parse tracker response: " << e.what() << "**" << std::endl;
+    }
+
+    return trackerPeers;
+}
+
+

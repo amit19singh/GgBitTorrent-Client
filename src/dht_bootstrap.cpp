@@ -100,9 +100,8 @@ namespace DHT {
      *        with a FIND_NODE request for our own node ID.
      */
     void DHTBootstrap::bootstrap() {
-        // Re-initialize Winsock on Windows (redundant if constructor already did it, 
-        // but kept here to preserve original logic).
-        init_winsock();
+        // Re-initialize Winsock on Windows
+        // init_winsock();
 
         for (const auto& bootstrap_node : bootstrap_nodes_) {
             std::cout << "Contacting bootstrap node: " << bootstrap_node.ip 
@@ -118,6 +117,18 @@ namespace DHT {
         // Cleanup Winsock on Windows
         cleanup_winsock();
     }
+    
+    std::vector<DHT::Node> DHTBootstrap::findPeers(const NodeID& info_hash) {
+        std::vector<DHT::Node> allPeers;
+    
+        for (const auto& bootstrap_node : bootstrap_nodes_) {
+            std::vector<DHT::Node> found_nodes = send_find_node_request(bootstrap_node, info_hash);
+            allPeers.insert(allPeers.end(), found_nodes.begin(), found_nodes.end());
+        }
+    
+        return allPeers;
+    }
+    
 
     /**
      * @brief Retrieve the current routing table.

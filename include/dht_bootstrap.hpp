@@ -55,12 +55,13 @@ namespace DHT {
         const std::vector<Bucket>& get_routing_table() const;
         const std::vector<Node> get_bootstrap_nodes();
         static NodeID generate_random_node_id();
-        std::vector<Node> send_find_node_request(const Node& remote_node, const NodeID& target_id);
+        std::vector<Node> send_find_node_request(const Node& remote_node, const NodeID& target_id); // find peers
         void run(); // Main loop for handling incoming messages
 
         const NodeID& getMyNodeId() const {
             return my_node_id_;
         }
+        std::vector<DHT::Node> findPeers(const NodeID& info_hash);
 
 
     private:

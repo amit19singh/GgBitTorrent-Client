@@ -1,8 +1,12 @@
 #ifndef PEER_WIRE_PROTOCOL_HPP
 #define PEER_WIRE_PROTOCOL_HPP
 
+// #define MAX_BLOCK_SIZE 16384
+
 #include "../include/torrent_file_parser.hpp"
+#include "../include/piece_manager.hpp"
 #include "dht_bootstrap.hpp"
+#include <iomanip>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -10,6 +14,7 @@
 #include <mutex>
 #include <thread>
 #include <iostream>
+#include <sstream>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -37,7 +42,7 @@ public:
     ~PeerWireProtocol();
 
     // Establishes a connection with a peer
-    void connectToPeer(const std::string& peerIP, int peerPort);
+    int connectToPeer(const std::string& peerIP, int peerPort);
 
     // Sends handshake message to initiate the protocol
     void sendHandshake(int peerSocket);
@@ -83,13 +88,44 @@ public:
         return infoHash;
     }
 
-private:
+    std::vector<DHT::Node> queryTracker();
+
+    // Make the following private (public only for testing)
     std::unordered_map<int, std::shared_ptr<PeerConnection>> peers; // Stores peer connections
-    std::mutex peerMutex; // Synchronization for multi-threading
-    DHT::DHTBootstrap* dht_instance;   // Pointer to DHT instance
-    TorrentFileParser torrentFileParser;
     TorrentFile torrentFile; 
+    std::unique_ptr<PieceManager> pieceStorage;
+    DHT::DHTBootstrap* dht_instance;   // Pointer to DHT instance
+
+private:
+    // std::unordered_map<int, std::shared_ptr<PeerConnection>> peers; // Stores peer connections
+    std::mutex peerMutex; // Synchronization for multi-threading
+    // DHT::DHTBootstrap* dht_instance;   // Pointer to DHT instance
+    TorrentFileParser torrentFileParser;
+    // TorrentFile torrentFile; 
     std::array<uint8_t, 20> infoHash;
+    // std::vector<DHT::Node> parseTrackerPeers(const BencodedValue& peersValue);
+
+    std::string computeSHA1(const std::vector<uint8_t>& data);
+    // std::string computeSHA1(const std::vector<uint8_t>& data) {
+    //     unsigned char hash[SHA_DIGEST_LENGTH];  // SHA-1 produces 20-byte hash
+    //     SHA1(data.data(), data.size(), hash);
+    
+    //     std::ostringstream hashStream;
+    //     for (int i = 0; i < SHA_DIGEST_LENGTH; i++) {
+    //         hashStream << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
+    //     }
+    //     return hashStream.str();
+    // }
+
+    std::string rawToHex(const std::string& raw) {
+        std::ostringstream oss;
+        oss << std::hex << std::setw(2) << std::setfill('0');
+        for (unsigned char c : raw) {
+            oss << static_cast<int>(c);
+        }
+        return oss.str();
+    }
+    
 
 };
 

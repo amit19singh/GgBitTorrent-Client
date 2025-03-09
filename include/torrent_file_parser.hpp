@@ -29,6 +29,12 @@ public:
     TorrentFile parse();
     const int getNumPieces(); 
 
+    std::array<uint8_t, 20> computeSHA1(const std::string& data) {
+        std::array<uint8_t, 20> hash{};
+        SHA1(reinterpret_cast<const unsigned char*>(data.data()), data.size(), hash.data());
+        return hash;
+    }
+
 private:
     std::string filePath;
     BencodeParser bencodeParser;
@@ -39,12 +45,6 @@ private:
     int64_t extractInt(const BencodedValue& dict, const std::string& key);
     std::vector<std::string> extractPieces(const BencodedValue& dict);
     std::vector<std::pair<std::string, int64_t>> extractFiles(const BencodedValue& dict);
-
-    std::array<uint8_t, 20> computeSHA1(const std::string& data) {
-        std::array<uint8_t, 20> hash{};
-        SHA1(reinterpret_cast<const unsigned char*>(data.data()), data.size(), hash.data());
-        return hash;
-    }
 };
 
 #endif // TORRENT_FILE_PARSER_HPP
